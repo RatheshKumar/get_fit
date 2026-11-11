@@ -1,21 +1,23 @@
 # Get Fit
 
-Cross-platform Flutter client management app backed by Supabase. The repository contains the Phase 1 foundation and the Phase 2 workout implementation: trainer-owned client records, workout plans and exercises, assignments, client workout sessions, set logging, and an encrypted offline outbox. Phase 2 code has not been compiled or run against a live backend yet.
+Cross-platform Flutter client management app backed by Supabase. The repository contains the Phase 1 foundation and Phase 2 workout source: trainer-owned plans and exercises, assignments, client workout sessions, set logging, and an encrypted offline outbox. Live backend workflows have not been tested on this workstation.
 
 ## Architecture
 
-- `lib/`: Flutter app and Supabase client integration. The app uses the public anon key only; never put the service-role key in the mobile build.
+- `lib/`: Flutter app and Supabase client integration. The app uses the public publishable key only; never put the service-role key in the mobile build.
 - `supabase/migrations/`: Postgres schema and row-level security policies.
 - `supabase/functions/`: server-side operations that require the service role. Each function verifies the caller and trainer role.
 - `profiles`: auth identity and role. A client profile is linked to exactly one trainer.
 - `clients`: trainer-owned client data, readable by that trainer and the linked client.
 - `client_private_notes`: trainer-only notes isolated from client-visible rows.
+- `workout_plans`, `workout_assignments`, `workout_sessions`, and `workout_set_logs`: trainer-authored plans and client-owned workout records protected by RLS.
+- The mobile workout outbox uses `flutter_secure_storage`; stable UUIDs make retries idempotent and sync is ordered session, sets, then completion.
 
 ## Local Setup
 
-Prerequisites: Flutter 3.24 or newer, the Supabase CLI, and a Supabase project with email auth enabled. For production invitations, configure a verified SMTP provider and the Supabase Auth site URL/redirect settings.
+Prerequisites: Flutter 3.24 or newer and the Supabase CLI. The app signs in with passwords using a real email address or a username/mobile identifier. Username and mobile identifiers map to reserved synthetic `@example.com` Auth addresses because Supabase rejects `.local` domains; no email is sent for those accounts.
 
-1. Link the Supabase CLI to your project and apply the migration:
+1. The auth and client-domain migration is applied to the linked project. For a fresh project, link the CLI and apply migrations after reviewing the SQL:
 
    ```powershell
    supabase login
@@ -23,39 +25,38 @@ Prerequisites: Flutter 3.24 or newer, the Supabase CLI, and a Supabase project w
    supabase db push
    ```
 
-2. Deploy the account functions:
+2. Deploy the account functions after the migration:
 
    ```powershell
-   supabase functions deploy invite-client
+   supabase functions deploy create-trainer
+   supabase functions deploy create-client
+   supabase functions deploy reset-client-password
    supabase functions deploy delete-client
    ```
 
    Supabase Edge Functions receive project credentials in their managed environment. Do not copy the service-role key into Flutter, source control, or a client-side `.env` file.
 
-3. Generate the native Flutter runners and configure email-link redirects for your chosen app scheme on Android and iOS. For example, use `getfit://auth-callback` consistently in the native URL handlers and Supabase Auth's allowed redirect URLs. Set the invitation redirect in the Edge Function environment:
+3. For the hosted project, turn off email confirmation and the Phone provider in Supabase Auth settings. The app does not use OTP or magic links. Trainer and client users are created with confirmed passwords by the server-side Edge Functions. Set up Android signing and iOS bundle identifiers before store builds.
 
-   ```powershell
-   flutter create . --platforms android,ios
-   supabase secrets set CLIENT_APP_REDIRECT_URL=getfit://auth-callback
-   ```
-
-   Pass the same redirect at runtime with `--dart-define=AUTH_REDIRECT_URL=getfit://auth-callback` and add it to Supabase Auth's redirect allowlist. Register the URL scheme in both native runners. The production email template must link back to the installed app. Set up Android signing, iOS bundle identifiers, and associated app-link domains before store builds.
-
-4. Install packages and run with the project URL and public anon key:
+4. Install packages and run on an attached device with the project URL and public publishable key:
 
    ```powershell
    flutter pub get
-   flutter run --dart-define=SUPABASE_URL=https://YOUR_PROJECT.supabase.co --dart-define=SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY --dart-define=AUTH_REDIRECT_URL=getfit://auth-callback
+   flutter run --dart-define=SUPABASE_URL=https://YOUR_PROJECT.supabase.co --dart-define=SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLIC_PUBLISHABLE_KEY
    ```
 
-The app intentionally shows a configuration error when those values are absent. Invitations currently require an email address; phone is stored as optional contact information. No fake records are bundled.
+The app intentionally shows a configuration error when the Supabase URL or publishable key is absent. Client passwords are generated by the `create-client` Edge Function and shown once to the trainer; resets are handled by `reset-client-password`. Never place the service-role key in the app. No fake records are bundled.
+
+## Client App Flow
+
+The trainer creates a client account and securely shares the displayed email, username, or phone login ID plus the generated temporary password. The client installs the same app, signs in from the login screen, and lands on **Today**. That screen shows the assigned workout, coaching goal, and latest body weight. **Workouts** opens the assigned plan and workout logger; **Progress** lets the client record weight and see the saved history; **Profile** shows account details, training status, and sign-out.
 
 ## Phase 1 Checks
 
-Run the app on both platforms after configuring the project and SMTP. Verify these manually against a non-production Supabase project:
+Run the app on both platforms after configuring the project and password auth. Verify these manually against a non-production Supabase project:
 
-- [ ] Email sign-in link completes authentication and session restoration.
-- [ ] A new trainer can create a trainer profile; an invited client receives a working invitation.
+- [ ] Email, username, or mobile ID with password completes authentication and session restoration on a physical device.
+- [ ] A new trainer can create an account and an invited client can sign in with the generated credentials.
 - [ ] Trainer can find clients by name, email, and goal, and filter active/paused records.
 - [ ] Trainer can view and edit client details, pause/resume a client, and maintain private notes.
 - [ ] Client can read only their own linked client record; another trainer cannot read or modify it.
@@ -63,7 +64,7 @@ Run the app on both platforms after configuring the project and SMTP. Verify the
 - [ ] Deleting a client removes the auth account and associated profile/client data.
 - [ ] Empty, loading, network-error, and retry states behave correctly.
 
-Current verification status: Supabase CLI 2.122.0 is installed, but Flutter/Dart, Docker, and a linked Supabase project were unavailable. Device builds and live backend checks have not been run. Workspace diagnostics reported no issues in the edited Dart, TypeScript, and SQL files; this is not a substitute for compilation or database tests.
+Current verification status: Flutter and a connected device are not available on the current workstation PATH. Live SMS delivery and backend/RLS checks require project credentials, an enabled SMS provider, and applied migrations. Android can be tested from Windows; iOS builds require macOS/Xcode.
 
 ## Adding Features
 
@@ -71,9 +72,11 @@ Add each domain table and its RLS policies in a new migration before wiring a sc
 
 ## Delivery Status
 
+Phase 1 foundation is in place, Phase 2 workout functionality is present but not verified, and Phases 3-5 remain as future delivery milestones. This repository is not yet a production-ready release.
+
 ## Phase 2 Checks
 
-After applying migrations and installing Flutter dependencies, verify these flows on iOS and Android:
+After applying migrations, installing Flutter dependencies, and configuring phone authentication, verify these flows on iOS and Android:
 
 - [ ] Trainer creates exercises, builds a plan, changes exercise prescriptions, and assigns it to a client.
 - [ ] Client sees only an active plan assigned to their own account and can open its exercise instructions/demo links.
@@ -83,8 +86,46 @@ After applying migrations and installing Flutter dependencies, verify these flow
 - [ ] A client cannot read another client's assignments, plans, sessions, or set logs; a trainer can read only their clients' logs.
 - [ ] Rejected writes remain visible as errors and are not silently reported as synced.
 
-Current Phase 2 verification status: not run. Flutter/Dart, Docker, and a linked Supabase project are unavailable in this workspace. The Supabase CLI is installed, but local database lint requires Docker and a running local Supabase stack.
+Current Phase 2 verification status: Flutter analysis and the startup smoke test pass; the Android debug APK artifact was generated. Live assignment, RLS, Realtime, offline/reconnect, and data-integrity flows are not verified because no Supabase project or local Docker database is configured.
 
-## Delivery Status
+## Phase 3 Checks
 
-Phase 2 workout source is present but unverified. Diet plans and phases 3-5, release builds, push delivery, analytics, scheduling, imports/exports, fees, chat/media, account export/consent flows, localization, and store checklists remain to be implemented. This repository is not a production-ready release.
+Phase 3 focuses on nutrition coaching and client habit tracking. Implement and verify the following before moving to launch work:
+
+- [ ] Trainer creates a diet plan with calories, macro targets, meal templates, and notes for a specific client.
+- [ ] Client sees only their assigned active diet plan and cannot access another client's nutrition data or meal records.
+- [ ] Trainer can update dietary targets, change meal preferences, and pause/resume custom nutrition guidance.
+- [ ] Client can log meals, hydration, adherence, and food notes, and the trainer can review progress over time.
+- [ ] Meal-plan changes, adherence updates, and deletion rules are protected by row-level security and trainer/client ownership checks.
+- [ ] Offline nutrition entries queue correctly, sync in the proper order, and surface rejected writes without silently marking them complete.
+
+Current Phase 3 verification status: not started. The app does not yet include diet-plan data models, policy enforcement, or a coaching screen for nutrition tracking.
+
+## Phase 4 Checks
+
+Phase 4 covers the product surfaces and operations needed for a reliable client workflow beyond the core fitness app:
+
+- [ ] Push notifications for assignment reminders, session completions, missed workouts, and plan updates are delivered only to the correct profile.
+- [ ] Coaching calendar and scheduling screens support sessions, recurring availability, and appointment reminders without exposing unrelated records.
+- [ ] Usage analytics and event tracking capture client engagement, workout completion, and plan adherence without leaking sensitive trainer data.
+- [ ] Data import/export flows support client records, plans, and workout logs with validation and safe error handling.
+- [ ] Fee and billing flows, invoice records, and payment status tracking are isolated to the relevant trainer/client relationship.
+- [ ] Chat, media, and shared notes features enforce ownership rules and do not permit cross-client access.
+- [ ] Account export and consent-management flows allow users to review collected data, request download, and initiate deletion or consent updates.
+- [ ] Regression tests cover cross-trainer access, sync ordering, offline conflict handling, and rejected-write visibility.
+
+Current Phase 4 verification status: not started. The app is still missing the production operations, reporting, and business-surface features needed for a scalable client experience.
+
+## Phase 5 Checks
+
+Phase 5 is the release-readiness and app-store stabilization phase. Finish these before public launch:
+
+- [ ] Release builds succeed for Android and iOS with signed configuration, deep-link validation, and environment-specific settings.
+- [ ] Localization and accessibility checks pass for core screens, onboarding flows, workout timers, and content labels in the target languages.
+- [ ] Store and compliance checklists are complete for privacy policy, consent notices, data retention, and local app-store requirements.
+- [ ] Production monitoring, crash reporting, and analytics dashboards are configured for key funnel events and failed syncs.
+- [ ] End-to-end regression coverage confirms onboarding, workouts, nutrition, scheduling, and offline sync workflows across real devices.
+- [ ] Beta rollout, feedback collection, issue triage, and hotfix procedures are documented for the launch team.
+- [ ] Final launch checklist confirms security review, export/deletion processes, app-store metadata, and recovery procedures are ready.
+
+Current Phase 5 verification status: not started. This phase remains a release, compliance, and operational readiness milestone rather than a feature implementation pass.

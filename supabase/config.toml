@@ -18,9 +18,19 @@ additional_redirect_urls = ["getfit://auth-callback"]
 [auth.email]
 enable_signup = true
 double_confirm_changes = true
-enable_confirmations = true
+enable_confirmations = false
 
-[functions.invite-client]
+[auth.sms]
+enable_signup = false
+enable_confirmations = false
+
+[functions.create-trainer]
+verify_jwt = false
+
+[functions.create-client]
+verify_jwt = true
+
+[functions.reset-client-password]
 verify_jwt = true
 
 [functions.delete-client]

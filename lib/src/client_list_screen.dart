@@ -18,6 +18,7 @@ class _ClientListScreenState extends State<ClientListScreen> {
   final _searchController = TextEditingController();
   String _statusFilter = 'all';
   String _search = '';
+  bool _inviting = false;
   late Stream<List<Map<String, dynamic>>> _clients;
 
   @override
@@ -42,17 +43,26 @@ class _ClientListScreenState extends State<ClientListScreen> {
       builder: (context) => const _InviteClientDialog(),
     );
     if (draft == null || !mounted) return;
+    setState(() => _inviting = true);
     try {
-      await Supabase.instance.client.functions.invoke('invite-client', body: draft);
+      final result = await Supabase.instance.client.functions.invoke('create-client', body: draft);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Invitation sent.')),
+        final data = result.data as Map<String, dynamic>;
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Client account created'),
+            content: SelectableText('Share these sign-in details securely.\n\nLogin: ${data['login_id']}\nTemporary password: ${data['password']}'),
+            actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Done'))],
+          ),
         );
       }
     } on FunctionException catch (error) {
       if (mounted) _showError(error.details?.toString() ?? 'Could not invite this client.');
     } catch (_) {
       if (mounted) _showError('Could not send the invitation. Check your connection and retry.');
+    } finally {
+      if (mounted) setState(() => _inviting = false);
     }
   }
 
@@ -80,16 +90,22 @@ class _ClientListScreenState extends State<ClientListScreen> {
           ],
         ),
         floatingActionButton: FloatingActionButton.extended(
-          onPressed: _inviteClient,
-          icon: const Icon(Icons.person_add_alt_1),
-          label: const Text('Add client'),
+          onPressed: _inviting ? null : _inviteClient,
+          icon: _inviting
+              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.person_add_alt_1),
+          label: Text(_inviting ? 'Sending…' : 'Add client'),
         ),
         body: SafeArea(
           child: Column(children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Welcome, ${widget.trainerName}', style: Theme.of(context).textTheme.titleMedium),
+                Text('Your coaching space', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: const Color(0xff64738d), fontWeight: FontWeight.w600)),
+                const SizedBox(height: 3),
+                Text('Welcome, ${widget.trainerName}', style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: const Color(0xff14213d), fontWeight: FontWeight.w800)),
+                const SizedBox(height: 4),
+                const Text('Keep every client moving forward.', style: TextStyle(color: Color(0xff71809a))),
                 const SizedBox(height: 16),
                 TextField(
                   controller: _searchController,
@@ -159,20 +175,39 @@ class _ClientListScreenState extends State<ClientListScreen> {
                       message: hasClients ? 'Try another search or filter.' : 'Add a client to get started.',
                     );
                   }
-                  return RefreshIndicator(
-                    onRefresh: () async {
-                      setState(() => _clients = Supabase.instance.client
-                          .from('clients')
-                          .stream(primaryKey: ['id'])
-                          .eq('trainer_id', Supabase.instance.client.auth.currentUser!.id)
-                          .order('full_name'));
-                    },
-                    child: ListView.separated(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
-                      itemCount: records.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 8),
-                      itemBuilder: (context, index) => _ClientTile(client: records[index]),
-                    ),
+                  final allRecords = snapshot.data ?? [];
+                  final activeCount = allRecords.where((client) => client['status'] == 'active').length;
+                  final pausedCount = allRecords.length - activeCount;
+                  return Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+                        child: Row(children: [
+                          Expanded(child: _RosterMetric(value: '${allRecords.length}', label: 'Total clients', icon: Icons.groups_2_outlined)),
+                          const SizedBox(width: 9),
+                          Expanded(child: _RosterMetric(value: '$activeCount', label: 'Active', icon: Icons.bolt_outlined)),
+                          const SizedBox(width: 9),
+                          Expanded(child: _RosterMetric(value: '$pausedCount', label: 'Paused', icon: Icons.pause_circle_outline)),
+                        ]),
+                      ),
+                      Expanded(
+                        child: RefreshIndicator(
+                          onRefresh: () async {
+                            setState(() => _clients = Supabase.instance.client
+                                .from('clients')
+                                .stream(primaryKey: ['id'])
+                                .eq('trainer_id', Supabase.instance.client.auth.currentUser!.id)
+                                .order('full_name'));
+                          },
+                          child: ListView.separated(
+                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+                            itemCount: records.length,
+                            separatorBuilder: (_, __) => const SizedBox(height: 10),
+                            itemBuilder: (context, index) => _ClientTile(client: records[index]),
+                          ),
+                        ),
+                      ),
+                    ],
                   );
                 },
               ),
@@ -192,18 +227,47 @@ class _ClientTile extends StatelessWidget {
     final active = client['status'] == 'active';
     final name = client['full_name'] as String;
     return Card(
+      clipBehavior: Clip.antiAlias,
       child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-        leading: CircleAvatar(child: Text(name.substring(0, 1).toUpperCase())),
-        title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text(client['goal'] as String, maxLines: 1, overflow: TextOverflow.ellipsis),
-        trailing: Icon(active ? Icons.chevron_right : Icons.pause_circle_outline),
-        onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
-          builder: (_) => ClientProfileScreen(client: client),
-        )),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+        leading: CircleAvatar(
+          radius: 25,
+          backgroundColor: const Color(0xffe8eeff),
+          child: Text(name.substring(0, 1).toUpperCase(), style: const TextStyle(color: Color(0xff2458dc), fontWeight: FontWeight.w800)),
+        ),
+        title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Color(0xff14213d), fontWeight: FontWeight.w700)),
+        subtitle: Padding(padding: const EdgeInsets.only(top: 4), child: Text(client['goal'] as String, maxLines: 1, overflow: TextOverflow.ellipsis)),
+        trailing: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(active ? Icons.circle : Icons.pause_circle_outline, size: active ? 11 : 19, color: active ? const Color(0xff2baf78) : const Color(0xff8a96aa)),
+          const SizedBox(height: 3),
+          Text(active ? 'Active' : 'Paused', style: TextStyle(fontSize: 10, color: active ? const Color(0xff23845c) : const Color(0xff7b879a))),
+        ]),
+        onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => ClientProfileScreen(client: client))),
       ),
     );
   }
+}
+
+class _RosterMetric extends StatelessWidget {
+  const _RosterMetric({required this.value, required this.label, required this.icon});
+
+  final String value;
+  final String label;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
+        decoration: BoxDecoration(color: Colors.white, border: Border.all(color: const Color(0xffe8edf6)), borderRadius: BorderRadius.circular(16)),
+        child: Row(children: [
+          Icon(icon, size: 18, color: const Color(0xff2458dc)),
+          const SizedBox(width: 7),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(value, style: const TextStyle(color: Color(0xff14213d), fontSize: 18, fontWeight: FontWeight.w800)),
+            Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Color(0xff71809a), fontSize: 10)),
+          ])),
+        ]),
+      );
 }
 
 class ClientProfileScreen extends StatefulWidget {
@@ -311,6 +375,33 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
     }
   }
 
+  Future<void> _resetClientPassword() async {
+    setState(() => _busy = true);
+    try {
+      final result = await Supabase.instance.client.functions.invoke(
+        'reset-client-password',
+        body: {'client_id': _client['id']},
+      );
+      if (mounted) {
+        final data = result.data as Map<String, dynamic>;
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Password reset'),
+            content: SelectableText('Share this new password securely with the client.\n\n${data['password']}'),
+            actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Done'))],
+          ),
+        );
+      }
+    } on FunctionException catch (error) {
+      if (mounted) _showMessage(error.details?.toString() ?? 'Could not reset the password.');
+    } catch (_) {
+      if (mounted) _showMessage('Could not reset the password. Check your connection and retry.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   void _showMessage(String message) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 
   @override
@@ -377,6 +468,12 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
               onPressed: _busy ? null : _toggleStatus,
               icon: Icon(_client['status'] == 'active' ? Icons.pause : Icons.play_arrow),
               label: Text(_client['status'] == 'active' ? 'Pause client' : 'Resume client'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _busy ? null : _resetClientPassword,
+              icon: const Icon(Icons.password),
+              label: const Text('Reset client password'),
             ),
             const SizedBox(height: 8),
             OutlinedButton.icon(
@@ -496,16 +593,14 @@ class _InviteClientDialog extends StatefulWidget {
 class _InviteClientDialogState extends State<_InviteClientDialog> {
   final _formKey = GlobalKey<FormState>();
   final _name = TextEditingController();
-  final _email = TextEditingController();
-  final _phone = TextEditingController();
+  final _loginId = TextEditingController();
   final _goal = TextEditingController();
   final _weight = TextEditingController();
 
   @override
   void dispose() {
     _name.dispose();
-    _email.dispose();
-    _phone.dispose();
+    _loginId.dispose();
     _goal.dispose();
     _weight.dispose();
     super.dispose();
@@ -518,10 +613,12 @@ class _InviteClientDialogState extends State<_InviteClientDialog> {
     return null;
   }
 
-  String? _validateEmail(String? value) {
+  String? _validateLoginId(String? value) {
     final text = value?.trim() ?? '';
-    if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(text)) return 'Enter a valid email address.';
-    return null;
+    if (RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(text)) return null;
+    if (RegExp(r'^\+[1-9]\d{7,14}$').hasMatch(text)) return null;
+    if (RegExp(r'^[a-zA-Z0-9_.]{3,40}$').hasMatch(text)) return null;
+    return 'Enter an email, username, or phone with country code.';
   }
 
   String? _validateWeight(String? value) {
@@ -535,8 +632,7 @@ class _InviteClientDialogState extends State<_InviteClientDialog> {
     if (!_formKey.currentState!.validate()) return;
     Navigator.pop(context, {
       'full_name': _name.text.trim(),
-      'email': _email.text.trim(),
-      'phone': _phone.text.trim().isEmpty ? null : _phone.text.trim(),
+      'login_id': _loginId.text.trim(),
       'goal': _goal.text.trim(),
       'starting_weight_kg': _weight.text.trim().isEmpty ? null : double.parse(_weight.text.trim()),
     });
@@ -544,7 +640,7 @@ class _InviteClientDialogState extends State<_InviteClientDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-        title: const Text('Invite a client'),
+        title: const Text('Create client account'),
         content: SizedBox(
           width: 440,
           child: Form(
@@ -552,8 +648,7 @@ class _InviteClientDialogState extends State<_InviteClientDialog> {
             child: SingleChildScrollView(
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 TextFormField(controller: _name, maxLength: 120, decoration: const InputDecoration(labelText: 'Full name'), validator: (v) => _required(v, 'a name', 120)),
-                TextFormField(controller: _email, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'Email for invitation'), validator: _validateEmail),
-                TextFormField(controller: _phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Phone (optional)')),
+                TextFormField(controller: _loginId, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'Email, username, or phone', helperText: 'Phone numbers must include country code.'), validator: _validateLoginId),
                 TextFormField(controller: _goal, maxLength: 500, maxLines: 2, decoration: const InputDecoration(labelText: 'Primary goal'), validator: (v) => _required(v, 'a goal', 500)),
                 TextFormField(controller: _weight, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Starting weight (kg, optional)'), validator: _validateWeight),
               ]),
@@ -562,7 +657,7 @@ class _InviteClientDialogState extends State<_InviteClientDialog> {
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          FilledButton(onPressed: _submit, child: const Text('Send invitation')),
+          FilledButton(onPressed: _submit, child: const Text('Create account')),
         ],
       );
 }

@@ -27,10 +27,10 @@ class _WorkoutPlanLibraryScreenState extends State<WorkoutPlanLibraryScreen> {
       builder: (context) => const _PlanDraftDialog(),
     );
     if (draft == null || !mounted) return;
-    await _saveExercise(current, draft);
+    await _saveExercise(draft);
   }
 
-  Future<void> _saveExercise(List<Map<String, dynamic>> current, Map<String, dynamic> draft) async {
+  Future<void> _saveExercise(Map<String, dynamic> draft) async {
     setState(() => _saving = true);
     try {
       final id = await _repository.createPlan(name: draft['name']!, description: draft['description']!);
@@ -143,6 +143,10 @@ class _WorkoutPlanEditorScreenState extends State<WorkoutPlanEditorScreen> {
       builder: (context) => _PlanExerciseDialog(initial: null),
     );
     if (draft == null || !mounted) return;
+    await _saveExercise(current, draft);
+  }
+
+  Future<void> _saveExercise(List<Map<String, dynamic>> current, Map<String, dynamic> draft) async {
     setState(() => _saving = true);
     try {
       final itemId = draft['id'] as String?;
@@ -342,19 +346,22 @@ class _AssignWorkoutScreenState extends State<AssignWorkoutScreen> {
             }
             return Column(children: [
               Expanded(
-                child: ListView.builder(
-                  itemCount: plans.length,
-                  itemBuilder: (context, index) {
-                    final plan = plans[index];
-                    final id = plan['id'] as String;
-                    return RadioListTile<String>(
-                      value: id,
-                      groupValue: _selectedPlan,
-                      onChanged: (value) => setState(() => _selectedPlan = value),
-                      title: Text(plan['name'] as String),
-                      subtitle: Text(plan['description'] as String),
-                    );
+                child: RadioGroup<String>(
+                  groupValue: _selectedPlan,
+                  onChanged: (value) {
+                    if (value != null) setState(() => _selectedPlan = value);
                   },
+                  child: ListView.builder(
+                    itemCount: plans.length,
+                    itemBuilder: (context, index) {
+                      final plan = plans[index];
+                      return RadioListTile<String>(
+                        value: plan['id'] as String,
+                        title: Text(plan['name'] as String),
+                        subtitle: Text(plan['description'] as String),
+                      );
+                    },
+                  ),
                 ),
               ),
               SafeArea(

@@ -13,12 +13,52 @@ class GetFitApp extends StatelessWidget {
         title: 'Get Fit',
         theme: ThemeData(
           colorScheme: ColorScheme.fromSeed(
-            seedColor: const Color(0xff6fae43),
+            seedColor: const Color(0xff1769e0),
             brightness: Brightness.light,
           ),
           useMaterial3: true,
+          scaffoldBackgroundColor: const Color(0xfff5f8ff),
+          appBarTheme: const AppBarTheme(
+            backgroundColor: Colors.white,
+            foregroundColor: Color(0xff17233b),
+            surfaceTintColor: Colors.transparent,
+          ),
+          cardTheme: CardThemeData(
+            color: Colors.white,
+            elevation: 0,
+            margin: EdgeInsets.zero,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+              side: const BorderSide(color: Color(0xffe8edf6)),
+            ),
+          ),
+          navigationBarTheme: NavigationBarThemeData(
+            backgroundColor: Colors.white,
+            indicatorColor: const Color(0xffe6edff),
+            labelTextStyle: WidgetStateProperty.resolveWith((states) => TextStyle(
+                  fontSize: 12,
+                  fontWeight: states.contains(WidgetState.selected) ? FontWeight.w700 : FontWeight.w500,
+                )),
+          ),
+          filledButtonTheme: FilledButtonThemeData(
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(48, 52),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+              textStyle: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
           inputDecorationTheme: const InputDecorationTheme(
-            border: OutlineInputBorder(),
+            filled: true,
+            fillColor: Colors.white,
+            border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.all(Radius.circular(12)),
+              borderSide: BorderSide(color: Color(0xffcbd7eb)),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.all(Radius.circular(12)),
+              borderSide: BorderSide(color: Color(0xff1769e0), width: 2),
+            ),
           ),
         ),
         home: const AuthGate(),
@@ -88,6 +128,8 @@ class _AccountScreenState extends State<AccountScreen> {
         'id': userId,
         'role': 'trainer',
         'full_name': name,
+        'username': Supabase.instance.client.auth.currentUser!.email!.split('@').first,
+        'status': 'active',
       });
       if (mounted) setState(() => _profile = _loadProfile());
     } on PostgrestException catch (error) {

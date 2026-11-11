@@ -6,15 +6,15 @@ import 'src/app.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
-  const supabaseAnonKey = String.fromEnvironment('SUPABASE_ANON_KEY');
+  const supabasePublishableKey = String.fromEnvironment('SUPABASE_PUBLISHABLE_KEY');
 
-  if (supabaseUrl.isEmpty || supabaseAnonKey.isEmpty) {
+  if (supabaseUrl.isEmpty || supabasePublishableKey.isEmpty) {
     runApp(const ConfigurationRequiredApp());
     return;
   }
 
   try {
-    await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+    await Supabase.initialize(url: supabaseUrl, publishableKey: supabasePublishableKey);
     runApp(const GetFitApp());
   } catch (error) {
     runApp(ConfigurationRequiredApp(error: error.toString()));
@@ -29,7 +29,10 @@ class ConfigurationRequiredApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'Get Fit',
-        theme: ThemeData(colorSchemeSeed: const Color(0xff79b84a)),
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff1769e0)),
+          scaffoldBackgroundColor: const Color(0xfff5f8ff),
+        ),
         home: Scaffold(
           body: Center(
             child: Padding(
@@ -44,8 +47,8 @@ class ConfigurationRequiredApp extends StatelessWidget {
                         style: Theme.of(context).textTheme.headlineSmall),
                     const SizedBox(height: 12),
                     const Text(
-                      'Run the app with SUPABASE_URL and SUPABASE_ANON_KEY '
-                      'configured. See the README for setup steps.',
+                      'Run the app with SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY '
+                      'configured. Find both in your Supabase project settings.',
                     ),
                     if (error != null) ...[
                       const SizedBox(height: 12),

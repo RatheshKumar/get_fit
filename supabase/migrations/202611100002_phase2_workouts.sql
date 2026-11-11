@@ -42,8 +42,39 @@ create table public.workout_assignments (
 
 create index workout_assignments_client_active_idx
   on public.workout_assignments (client_id, is_active, starts_on desc);
+create unique index workout_assignments_one_active_per_client_idx
+  on public.workout_assignments (client_id) where is_active;
 create index workout_plan_exercises_plan_position_idx
   on public.workout_plan_exercises (plan_id, position);
+
+create function public.assign_workout_plan(target_client_id uuid, target_plan_id uuid)
+returns uuid
+language plpgsql
+set search_path = ''
+as $$
+declare
+  new_assignment_id uuid;
+begin
+  if auth.uid() is null then
+    raise exception 'Sign in to assign a workout plan';
+  end if;
+
+  update public.workout_assignments
+  set is_active = false
+  where client_id = target_client_id
+    and trainer_id = auth.uid()
+    and is_active;
+
+  insert into public.workout_assignments (trainer_id, client_id, plan_id)
+  values (auth.uid(), target_client_id, target_plan_id)
+  returning id into new_assignment_id;
+
+  return new_assignment_id;
+end;
+$$;
+
+revoke all on function public.assign_workout_plan(uuid, uuid) from public;
+grant execute on function public.assign_workout_plan(uuid, uuid) to authenticated;
 
 create table public.workout_sessions (
   id uuid primary key,
@@ -89,9 +120,34 @@ alter table public.workout_assignments enable row level security;
 alter table public.workout_sessions enable row level security;
 alter table public.workout_set_logs enable row level security;
 
+create function public.can_client_read_exercise(target_exercise_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select exists (
+    select 1
+    from public.workout_plan_exercises plan_exercise
+    join public.workout_plans plan on plan.id = plan_exercise.plan_id
+    join public.workout_assignments assignment on assignment.plan_id = plan.id
+    join public.clients client on client.id = assignment.client_id
+    where plan_exercise.exercise_id = target_exercise_id
+      and client.profile_id = (select auth.uid())
+      and assignment.is_active
+  );
+$$;
+
+revoke all on function public.can_client_read_exercise(uuid) from public;
+grant execute on function public.can_client_read_exercise(uuid) to authenticated;
+
 create policy exercise_library_read_available
 on public.exercise_library for select to authenticated
-using (true);
+using (
+  trainer_id = (select auth.uid())
+  or public.can_client_read_exercise(id)
+);
 
 create policy exercise_library_trainer_create
 on public.exercise_library for insert to authenticated
@@ -266,6 +322,7 @@ with check (
     where assignment.id = workout_sessions.assignment_id
       and assignment.client_id = workout_sessions.client_id
       and assignment.is_active
+      and client.status = 'active'
       and client.profile_id = (select auth.uid())
   )
 );
@@ -319,32 +376,8 @@ with check (
     where session.id = workout_set_logs.session_id
       and session.status = 'active'
       and session.client_id = client.id
-      and plan_exercise.plan_id = assignment.plan_id
-      and plan_exercise.id = workout_set_logs.plan_exercise_id
-      and client.profile_id = (select auth.uid())
-  )
-);
-
-create policy workout_set_logs_client_update
-on public.workout_set_logs for update to authenticated
-using (
-  exists (
-    select 1
-    from public.workout_sessions session
-    join public.workout_assignments assignment on assignment.id = session.assignment_id
-    join public.clients client on client.id = assignment.client_id
-    where session.id = workout_set_logs.session_id and client.profile_id = (select auth.uid())
-  )
-)
-with check (
-  exists (
-    select 1
-    from public.workout_sessions session
-    join public.workout_assignments assignment on assignment.id = session.assignment_id
-    join public.clients client on client.id = assignment.client_id
-    join public.workout_plan_exercises plan_exercise on plan_exercise.id = workout_set_logs.plan_exercise_id
-    where session.id = workout_set_logs.session_id
-      and session.status = 'active'
+      and assignment.is_active
+      and client.status = 'active'
       and plan_exercise.plan_id = assignment.plan_id
       and plan_exercise.id = workout_set_logs.plan_exercise_id
       and client.profile_id = (select auth.uid())
@@ -352,6 +385,7 @@ with check (
 );
 
 alter publication supabase_realtime add table
+  public.exercise_library,
   public.workout_plans,
   public.workout_plan_exercises,
   public.workout_assignments,
@@ -363,12 +397,9 @@ grant select, insert, update, delete on public.workout_plans to authenticated;
 grant select, insert, update, delete on public.workout_plan_exercises to authenticated;
 grant select, insert, update, delete on public.workout_assignments to authenticated;
 grant select on public.workout_sessions to authenticated;
-grant insert (id, assignment_id, client_id) on public.workout_sessions to authenticated;
-grant update (id, assignment_id, client_id, status, completed_at)
-  on public.workout_sessions to authenticated;
+grant insert (id, assignment_id, client_id, started_at) on public.workout_sessions to authenticated;
+grant update (status, completed_at) on public.workout_sessions to authenticated;
 grant select, insert on public.workout_set_logs to authenticated;
-grant update (id, session_id, plan_exercise_id, set_number, reps_completed, weight_kg, logged_at)
-  on public.workout_set_logs to authenticated;
 grant all on public.exercise_library, public.workout_plans, public.workout_plan_exercises,
   public.workout_assignments, public.workout_sessions, public.workout_set_logs to service_role;
 

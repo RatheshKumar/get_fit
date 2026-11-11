@@ -17,6 +17,8 @@ class ClientWorkoutScreen extends StatefulWidget {
 class _ClientWorkoutScreenState extends State<ClientWorkoutScreen> with WidgetsBindingObserver {
   final _repository = WorkoutRepository(Supabase.instance.client);
   late Future<_WorkoutViewData?> _workout;
+  RealtimeChannel? _workoutChannel;
+  String? _watchedPlan;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   String? _sessionId;
   final Map<String, int> _setCounts = {};
@@ -36,7 +38,11 @@ class _ClientWorkoutScreenState extends State<ClientWorkoutScreen> with WidgetsB
 
   Future<_WorkoutViewData?> _loadWorkout() async {
     final assignment = await _repository.loadClientAssignment();
-    if (assignment == null) return null;
+    if (assignment == null) {
+      _stopWatchingWorkout();
+      return null;
+    }
+    _watchWorkout(assignment);
     final sessionId = await _repository.findActiveSession(assignment['id'] as String);
     final counts = sessionId == null ? <String, int>{} : await _repository.loadSetCounts(sessionId);
     return _WorkoutViewData(assignment: assignment, sessionId: sessionId, setCounts: counts);
@@ -47,10 +53,75 @@ class _ClientWorkoutScreenState extends State<ClientWorkoutScreen> with WidgetsB
     if (state == AppLifecycleState.resumed) unawaited(_syncPending());
   }
 
+  void _watchWorkout(Map<String, dynamic> assignment) {
+    final userId = Supabase.instance.client.auth.currentUser!.id;
+    final clientId = assignment['client_id'] as String;
+    final planId = assignment['plan_id'] as String;
+    final key = '$clientId:$planId';
+    if (_watchedPlan == key) return;
+    _stopWatchingWorkout();
+    _watchedPlan = key;
+    final client = Supabase.instance.client;
+    void refresh(PostgresChangePayload _) {
+      if (mounted) setState(() => _workout = _loadWorkout());
+    }
+
+    _workoutChannel = client
+        .channel('client-workout-$userId-$planId')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'workout_assignments',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'client_id',
+            value: clientId,
+          ),
+          callback: refresh,
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'workout_plans',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'id',
+            value: planId,
+          ),
+          callback: refresh,
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'workout_plan_exercises',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'plan_id',
+            value: planId,
+          ),
+          callback: refresh,
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'exercise_library',
+          callback: refresh,
+        )
+        .subscribe();
+  }
+
+  void _stopWatchingWorkout() {
+    final channel = _workoutChannel;
+    _workoutChannel = null;
+    _watchedPlan = null;
+    if (channel != null) unawaited(channel.unsubscribe().then<void>((_) {}));
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _connectivitySubscription?.cancel();
+    _stopWatchingWorkout();
     _restTimer?.cancel();
     super.dispose();
   }
@@ -144,10 +215,17 @@ class _ClientWorkoutScreenState extends State<ClientWorkoutScreen> with WidgetsB
 
   Future<void> _syncPending() async {
     try {
-      final synced = await _repository.syncPending();
-      if (synced > 0 && mounted) _message('$synced offline workout item${synced == 1 ? '' : 's'} synced.');
+      final result = await _repository.syncPending();
+      if (!mounted || result.busy) return;
+      if (result.offline) {
+        _message('Still offline. Your workout data remains saved securely on this device.');
+      } else if (result.error != null) {
+        _message('${result.error} Pending workout data remains saved and will retry.');
+      } else if (result.syncedCount > 0) {
+        _message('${result.syncedCount} offline workout item${result.syncedCount == 1 ? '' : 's'} synced.');
+      }
     } catch (_) {
-      // The secure outbox remains available for the next connectivity or resume event.
+      if (mounted) _message('Sync could not start. Your workout data remains saved securely on this device.');
     }
   }
 

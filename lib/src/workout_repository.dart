@@ -3,18 +3,22 @@ import 'dart:convert';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:synchronized/synchronized.dart';
 import 'package:uuid/uuid.dart';
 
 class WorkoutRepository {
   WorkoutRepository(this._client);
 
-  static const _queueKey = 'get_fit_workout_outbox_v1';
+  static const _queueKeyPrefix = 'get_fit_workout_outbox_v1_';
   static const _assignmentCachePrefix = 'get_fit_assignment_v1_';
   static const _uuid = Uuid();
   static const _storage = FlutterSecureStorage();
+  static final _outboxLock = Lock();
 
   final SupabaseClient _client;
   bool _syncing = false;
+
+  String get _queueKey => '$_queueKeyPrefix${_client.auth.currentUser!.id}';
 
   String newId() => _uuid.v4();
 
@@ -106,10 +110,9 @@ class WorkoutRepository {
     }
 
   Future<void> assignPlan({required String clientId, required String planId}) async {
-    await _client.from('workout_assignments').insert({
-      'trainer_id': _client.auth.currentUser!.id,
-      'client_id': clientId,
-      'plan_id': planId,
+    await _client.rpc('assign_workout_plan', params: {
+      'target_client_id': clientId,
+      'target_plan_id': planId,
     });
   }
 
@@ -166,9 +169,10 @@ class WorkoutRepository {
           .limit(1)
           .maybeSingle();
       final sessionId = session?['id'] as String?;
-      if (sessionId != null) {
-        active[assignmentId] = sessionId;
-        await _writeQueue(queue);
+      if (sessionId != null && !completed.contains(sessionId)) {
+        await _setActiveSession(assignmentId, sessionId);
+      } else if (sessionId != null) {
+        return null;
       }
       return sessionId;
     } catch (_) {
@@ -178,7 +182,7 @@ class WorkoutRepository {
 
   Future<Map<String, int>> loadSetCounts(String sessionId) async {
     final counts = <String, int>{};
-    try {
+    if (!await _isOffline()) {
       final rows = await _client
           .from('workout_set_logs')
           .select('plan_exercise_id, set_number')
@@ -188,10 +192,15 @@ class WorkoutRepository {
         final setNumber = row['set_number'] as int;
         if (setNumber > (counts[exerciseId] ?? 0)) counts[exerciseId] = setNumber;
       }
-    } catch (_) {}
+    }
 
     final queue = await _readQueue();
-    for (final row in (queue['sets'] as List).cast<Map<String, dynamic>>()) {
+    final cached = ((queue['counts'] as Map<String, dynamic>)[sessionId] as List? ?? [])
+        .cast<Map<String, dynamic>>();
+    for (final row in [
+      ...cached,
+      ...(queue['sets'] as List).cast<Map<String, dynamic>>(),
+    ]) {
       if (row['session_id'] != sessionId) continue;
       final exerciseId = row['plan_exercise_id'] as String;
       final setNumber = row['set_number'] as int;
@@ -205,6 +214,7 @@ class WorkoutRepository {
       'id': newId(),
       'assignment_id': assignmentId,
       'client_id': clientId,
+      'started_at': DateTime.now().toUtc().toIso8601String(),
     };
     try {
       if (await _isOffline()) throw const _OfflineException();
@@ -238,7 +248,8 @@ class WorkoutRepository {
     };
     try {
       if (await _isOffline()) throw const _OfflineException();
-      await _client.from('workout_set_logs').upsert(row, onConflict: 'id');
+      await _client.from('workout_set_logs').insert(row);
+      await _cacheSet(row);
       return true;
     } on _OfflineException {
       await _queueSet(row);
@@ -252,14 +263,14 @@ class WorkoutRepository {
   }
 
   Future<void> completeSession(String sessionId) async {
-    final queue = await _readQueue();
-    if ((queue['sessions'] as List).any((row) => row['id'] == sessionId)) {
+    final pending = await _mutateQueue<bool>((queue) async {
+      if (!(queue['sessions'] as List).any((row) => row['id'] == sessionId)) return false;
       final completed = queue['completed'] as List;
       if (!completed.contains(sessionId)) completed.add(sessionId);
       (queue['active'] as Map<String, dynamic>).removeWhere((_, value) => value == sessionId);
-      await _writeQueue(queue);
-      return;
-    }
+      return true;
+    });
+    if (pending) return;
     final update = {
       'status': 'completed',
       'completed_at': DateTime.now().toUtc().toIso8601String(),
@@ -267,9 +278,9 @@ class WorkoutRepository {
     try {
       if (await _isOffline()) throw const _OfflineException();
       await _client.from('workout_sessions').update(update).eq('id', sessionId);
-      final current = await _readQueue();
-      (current['active'] as Map<String, dynamic>).removeWhere((_, value) => value == sessionId);
-      await _writeQueue(current);
+      await _mutateQueue<void>((queue) async {
+        (queue['active'] as Map<String, dynamic>).removeWhere((_, value) => value == sessionId);
+      });
     } on _OfflineException {
       await _queueCompletion(sessionId);
     } on PostgrestException {
@@ -279,56 +290,76 @@ class WorkoutRepository {
     }
   }
 
-  Future<int> syncPending() async {
-    if (_syncing || await _isOffline()) return 0;
+  Future<WorkoutSyncResult> syncPending() async {
+    if (_syncing) return const WorkoutSyncResult(busy: true);
     _syncing = true;
     var synced = 0;
     try {
-      final queue = await _readQueue();
-      final sessions = queue['sessions'] as List;
-      while (sessions.isNotEmpty) {
+      if (await _isOffline()) return const WorkoutSyncResult(offline: true);
+      while (true) {
+        final sessions = (await _readQueue())['sessions'] as List;
+        if (sessions.isEmpty) break;
+        final row = Map<String, dynamic>.from(sessions.first as Map);
         try {
-          await _client.from('workout_sessions').upsert(sessions.first, onConflict: 'id');
-          sessions.removeAt(0);
-          await _writeQueue(queue);
+          await _client.from('workout_sessions').upsert(
+                row,
+                onConflict: 'id',
+                ignoreDuplicates: true,
+              );
+          await _removeQueuedRow('sessions', row['id']);
           synced++;
-        } catch (_) {
-          return synced;
+        } catch (error) {
+          return WorkoutSyncResult(syncedCount: synced, error: _errorMessage(error));
         }
       }
 
-      final sets = queue['sets'] as List;
-      while (sets.isNotEmpty) {
+      while (true) {
+        final sets = (await _readQueue())['sets'] as List;
+        if (sets.isEmpty) break;
+        final row = Map<String, dynamic>.from(sets.first as Map);
         try {
-          await _client.from('workout_set_logs').upsert(sets.first, onConflict: 'id');
-          sets.removeAt(0);
-          await _writeQueue(queue);
+          await _client.from('workout_set_logs').upsert(
+                row,
+                onConflict: 'id',
+                ignoreDuplicates: true,
+              );
+          await _removeQueuedRow('sets', row['id']);
           synced++;
-        } catch (_) {
-          return synced;
+        } catch (error) {
+          return WorkoutSyncResult(syncedCount: synced, error: _errorMessage(error));
         }
       }
 
-      final completed = queue['completed'] as List;
-      while (completed.isNotEmpty) {
+      while (true) {
+        final completed = (await _readQueue())['completed'] as List;
+        if (completed.isEmpty) break;
+        final sessionId = completed.first as String;
         try {
           await _client.from('workout_sessions').update({
             'status': 'completed',
             'completed_at': DateTime.now().toUtc().toIso8601String(),
-          }).eq('id', completed.first);
-          (queue['active'] as Map<String, dynamic>).removeWhere((_, value) => value == completed.first);
-          completed.removeAt(0);
-          await _writeQueue(queue);
+          }).eq('id', sessionId);
+          await _mutateQueue<void>((queue) async {
+            (queue['completed'] as List).remove(sessionId);
+            (queue['active'] as Map<String, dynamic>).removeWhere((_, value) => value == sessionId);
+            (queue['counts'] as Map<String, dynamic>).remove(sessionId);
+          });
           synced++;
-        } catch (_) {
-          return synced;
+        } catch (error) {
+          return WorkoutSyncResult(syncedCount: synced, error: _errorMessage(error));
         }
       }
-      return synced;
+      return WorkoutSyncResult(syncedCount: synced);
+    } catch (error) {
+      return WorkoutSyncResult(syncedCount: synced, error: _errorMessage(error));
     } finally {
       _syncing = false;
     }
   }
+
+  String _errorMessage(Object error) => error is PostgrestException
+      ? error.message
+      : 'Some workout data could not sync. It remains saved on this device.';
 
   Future<bool> _isOffline() async {
     final connectivity = await Connectivity().checkConnectivity();
@@ -343,6 +374,7 @@ class WorkoutRepository {
         'sets': <dynamic>[],
         'completed': <dynamic>[],
         'active': <String, dynamic>{},
+        'counts': <String, dynamic>{},
       };
     }
     final decoded = jsonDecode(encoded) as Map<String, dynamic>;
@@ -350,40 +382,70 @@ class WorkoutRepository {
     decoded['sets'] ??= <dynamic>[];
     decoded['completed'] ??= <dynamic>[];
     decoded['active'] ??= <String, dynamic>{};
+    decoded['counts'] ??= <String, dynamic>{};
     return decoded;
   }
 
   Future<void> _writeQueue(Map<String, dynamic> queue) =>
       _storage.write(key: _queueKey, value: jsonEncode(queue));
 
-  Future<void> _queueSession(Map<String, dynamic> row) async {
-    final queue = await _readQueue();
-    final sessions = queue['sessions'] as List;
-    if (!sessions.any((item) => item['id'] == row['id'])) sessions.add(row);
-    await _writeQueue(queue);
+  Future<T> _mutateQueue<T>(Future<T> Function(Map<String, dynamic>) change) =>
+      _outboxLock.synchronized(() async {
+        final queue = await _readQueue();
+        final result = await change(queue);
+        await _writeQueue(queue);
+        return result;
+      });
+
+  Future<void> _removeQueuedRow(String listKey, dynamic id) async {
+    await _mutateQueue<void>((queue) async {
+      (queue[listKey] as List).removeWhere((row) => row['id'] == id);
+    });
   }
 
-  Future<void> _queueSet(Map<String, dynamic> row) async {
-    final queue = await _readQueue();
-    final sets = queue['sets'] as List;
-    if (!sets.any((item) => item['id'] == row['id'])) sets.add(row);
-    await _writeQueue(queue);
-  }
+  Future<void> _queueSession(Map<String, dynamic> row) => _mutateQueue<void>((queue) async {
+        final sessions = queue['sessions'] as List;
+        if (!sessions.any((item) => item['id'] == row['id'])) sessions.add(row);
+      });
 
-  Future<void> _queueCompletion(String sessionId) async {
-    final queue = await _readQueue();
-    final completed = queue['completed'] as List;
-    if (!completed.contains(sessionId)) completed.add(sessionId);
-    await _writeQueue(queue);
-  }
+  Future<void> _queueSet(Map<String, dynamic> row) => _mutateQueue<void>((queue) async {
+        final sets = queue['sets'] as List;
+        if (!sets.any((item) => item['id'] == row['id'])) sets.add(row);
+      _cacheSetInQueue(queue, row);
+      });
 
-  Future<void> _setActiveSession(String assignmentId, String sessionId) async {
-    final queue = await _readQueue();
-    (queue['active'] as Map<String, dynamic>)[assignmentId] = sessionId;
-    await _writeQueue(queue);
+  Future<void> _queueCompletion(String sessionId) => _mutateQueue<void>((queue) async {
+        final completed = queue['completed'] as List;
+        if (!completed.contains(sessionId)) completed.add(sessionId);
+      (queue['active'] as Map<String, dynamic>).removeWhere((_, value) => value == sessionId);
+      });
+
+  Future<void> _setActiveSession(String assignmentId, String sessionId) =>
+      _mutateQueue<void>((queue) async {
+        (queue['active'] as Map<String, dynamic>)[assignmentId] = sessionId;
+      });
+
+  Future<void> _cacheSet(Map<String, dynamic> row) => _mutateQueue<void>((queue) async {
+        _cacheSetInQueue(queue, row);
+      });
+
+  void _cacheSetInQueue(Map<String, dynamic> queue, Map<String, dynamic> row) {
+    final counts = queue['counts'] as Map<String, dynamic>;
+    final sessionRows = (counts[row['session_id']] as List?) ?? <dynamic>[];
+    if (!sessionRows.any((item) => item['id'] == row['id'])) sessionRows.add(row);
+    counts[row['session_id'] as String] = sessionRows;
   }
 }
 
 class _OfflineException implements Exception {
   const _OfflineException();
+}
+
+class WorkoutSyncResult {
+  const WorkoutSyncResult({this.syncedCount = 0, this.offline = false, this.busy = false, this.error});
+
+  final int syncedCount;
+  final bool offline;
+  final bool busy;
+  final String? error;
 }
