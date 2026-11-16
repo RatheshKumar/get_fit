@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'chat_screens.dart';
 import 'workout_plan_screens.dart';
 
 class ClientListScreen extends StatefulWidget {
@@ -75,6 +76,13 @@ class _ClientListScreenState extends State<ClientListScreen> {
         appBar: AppBar(
           title: Text('Clients', style: Theme.of(context).textTheme.titleLarge),
           actions: [
+            IconButton(
+              tooltip: 'Messages',
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                builder: (_) => const ChatInboxScreen(isTrainer: true),
+              )),
+              icon: const Icon(Icons.chat_bubble_outline),
+            ),
             IconButton(
               tooltip: 'Workout plans',
               onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
@@ -462,6 +470,19 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                       )),
               icon: const Icon(Icons.assignment_outlined),
               label: const Text('Assign workout plan'),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              onPressed: _busy || _client['profile_id'] == null
+                  ? null
+                  : () => Navigator.of(context).push(MaterialPageRoute<void>(
+                        builder: (_) => ChatConversationScreen(
+                          peerId: _client['profile_id'] as String,
+                          peerName: _client['full_name'] as String,
+                        ),
+                      )),
+              icon: const Icon(Icons.chat_bubble_outline),
+              label: const Text('Message client'),
             ),
             const SizedBox(height: 12),
             FilledButton.tonalIcon(

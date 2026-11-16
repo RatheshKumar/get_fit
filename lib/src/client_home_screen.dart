@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'chat_screens.dart';
 import 'client_workout_screen.dart';
 
 const _ink = Color(0xff14213d);
@@ -51,12 +52,12 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> {
   Widget build(BuildContext context) => Scaffold(
         backgroundColor: _surface,
         appBar: _tab == 1 ? null : AppBar(
-          title: Text(_tab == 0 ? 'My day' : _tab == 1 ? 'Training' : _tab == 2 ? 'My progress' : 'My profile'),
+          title: Text(_tab == 0 ? 'My day' : _tab == 1 ? 'Training' : _tab == 2 ? 'My progress' : _tab == 3 ? 'Messages' : 'My profile'),
           actions: [
-            if (_tab != 3)
+            if (_tab != 4)
               IconButton(
                 tooltip: 'Profile and sign out',
-                onPressed: () => setState(() => _tab = 3),
+                onPressed: () => setState(() => _tab = 4),
                 icon: const Icon(Icons.account_circle_outlined),
               ),
           ],
@@ -101,8 +102,10 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> {
                 : _tab == 2
                     ? _progress(client)
                     : _tab == 3
-                        ? _profile(client)
-                        : _today(client);
+                        ? const ChatInboxView(isTrainer: false)
+                        : _tab == 4
+                            ? _profile(client)
+                            : _today(client);
           },
         ),
         bottomNavigationBar: NavigationBar(
@@ -112,6 +115,7 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> {
             NavigationDestination(icon: Icon(Icons.today_outlined), selectedIcon: Icon(Icons.today), label: 'Today'),
             NavigationDestination(icon: Icon(Icons.fitness_center_outlined), selectedIcon: Icon(Icons.fitness_center), label: 'Workouts'),
             NavigationDestination(icon: Icon(Icons.insights_outlined), selectedIcon: Icon(Icons.insights), label: 'Progress'),
+            NavigationDestination(icon: Icon(Icons.chat_bubble_outline), selectedIcon: Icon(Icons.chat_bubble), label: 'Messages'),
             NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: 'Profile'),
           ],
         ),
